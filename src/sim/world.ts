@@ -11,6 +11,7 @@ import {
   HOUSE_DEMAND_CAP,
   HOUSE_INITIAL_HAPPINESS,
   HOUSE_POPULATION,
+  INITIAL_UNLOCKED_RECIPES,
   MAX_INFLIGHT_SHIPMENTS_PER_SOURCE,
   MAX_TRIP_TICKS,
   NODE_BUFFER_CAP,
@@ -21,7 +22,17 @@ import {
 } from './constants';
 import { findPath } from './pathfinding';
 import { RECIPES } from './recipes';
-import type { Action, Factory, Shipment, Tile, WorldState } from './types';
+import type {
+  Action,
+  Factory,
+  House,
+  RecipeId,
+  ResourceNode,
+  ResourceType,
+  Shipment,
+  Tile,
+  WorldState,
+} from './types';
 
 export function createWorldState(): WorldState {
   const grid: Tile[][] = [];
@@ -42,6 +53,7 @@ export function createWorldState(): WorldState {
     nextEntityId: 1,
     money: STARTING_MONEY,
     congestion: 0,
+    unlockedRecipes: [...INITIAL_UNLOCKED_RECIPES],
   };
 }
 
@@ -51,6 +63,46 @@ function inBounds(x: number, y: number): boolean {
 
 function countInFlightFrom(shipments: Shipment[], sourceId: string): number {
   return shipments.filter((s) => s.fromId === sourceId).length;
+}
+
+/** Any producer (resource node or factory) with something to ship. */
+interface Producer {
+  id: string;
+  x: number;
+  y: number;
+  resourceType: ResourceType;
+}
+
+/**
+ * Find something that currently wants `resourceType` AND is actually
+ * reachable from `from`: prefer a factory whose recipe consumes it (keeps
+ * multi-stage chains flowing), otherwise a house that demands it as a
+ * finished good. Tries every matching candidate, not just the first one
+ * by array order — an unreachable match (no road connection) must not
+ * block dispatch to a reachable one further down the list.
+ */
+function findConsumer(
+  grid: Tile[][],
+  from: { x: number; y: number },
+  resourceType: ResourceType,
+  factories: Factory[],
+  houses: House[],
+  excludeFactoryId?: string,
+): { entity: { id: string; x: number; y: number }; path: { x: number; y: number }[] } | undefined {
+  const factoryCandidates = factories.filter((f) => {
+    if (f.id === excludeFactoryId) return false;
+    const recipe = RECIPES[f.recipeId];
+    return resourceType in recipe.inputs && f.inputBuffer < FACTORY_INPUT_CAP;
+  });
+  const houseCandidates = houses.filter(
+    (h) => h.demand === resourceType && h.demandBuffer < HOUSE_DEMAND_CAP,
+  );
+
+  for (const candidate of [...factoryCandidates, ...houseCandidates]) {
+    const path = findPath(grid, from, { x: candidate.x, y: candidate.y });
+    if (path) return { entity: candidate, path };
+  }
+  return undefined;
 }
 
 /**
@@ -65,6 +117,8 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
   let resourceNodes = state.resourceNodes.slice();
   let factories = state.factories.slice();
   let houses = state.houses.slice();
+  const unlockedRecipes = new Set<RecipeId>(state.unlockedRecipes);
+  const validDemands = new Set<ResourceType>([...unlockedRecipes].map((id) => RECIPES[id].output));
 
   // --- Apply actions: place/remove tiles + entities. Placement costs
   // money; if the player can't afford it, the action is silently a no-op
@@ -92,37 +146,48 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
       }
 
       if (action.tileType === 'resourceNode') {
-        resourceNodes = [
-          ...resourceNodes,
-          {
-            id: `node-${nextEntityId++}`,
-            x: action.x,
-            y: action.y,
-            resourceType: 'ore',
-            buffer: 0,
-          },
-        ];
+        const node: ResourceNode = {
+          id: `node-${nextEntityId++}`,
+          x: action.x,
+          y: action.y,
+          resourceType: 'ore',
+          buffer: 0,
+        };
+        resourceNodes = [...resourceNodes, node];
+      } else if (action.tileType === 'forestNode') {
+        const node: ResourceNode = {
+          id: `node-${nextEntityId++}`,
+          x: action.x,
+          y: action.y,
+          resourceType: 'wood',
+          buffer: 0,
+        };
+        resourceNodes = [...resourceNodes, node];
       } else if (action.tileType === 'factory') {
+        const recipeId: RecipeId =
+          action.recipeId && unlockedRecipes.has(action.recipeId) ? action.recipeId : 'makeWidget';
         factories = [
           ...factories,
           {
             id: `factory-${nextEntityId++}`,
             x: action.x,
             y: action.y,
-            recipeId: 'makeWidget',
+            recipeId,
             inputBuffer: 0,
             outputBuffer: 0,
             progress: 0,
           },
         ];
       } else if (action.tileType === 'house') {
+        const demand: ResourceType =
+          action.demand && validDemands.has(action.demand) ? action.demand : 'widget';
         houses = [
           ...houses,
           {
             id: `house-${nextEntityId++}`,
             x: action.x,
             y: action.y,
-            demand: RECIPES.makeWidget.output,
+            demand,
             demandBuffer: 0,
             commuteBuffer: 0,
             happiness: HOUSE_INITIAL_HAPPINESS,
@@ -192,60 +257,57 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     commuteBuffer: Math.min(HOUSE_COMMUTE_CAP, h.commuteBuffer + 1),
   }));
 
-  // --- Dispatch: resource node -> factory (raw material freight). ---
-  for (const node of resourceNodes) {
-    if (node.buffer <= 0) continue;
-    if (countInFlightFrom(shipments, node.id) >= MAX_INFLIGHT_SHIPMENTS_PER_SOURCE) continue;
+  // Fresh copies so the dispatch loop below can mutate outputBuffer in
+  // place without corrupting the previous tick's state (resourceNodes
+  // already gets this via its production .map() above; factories don't
+  // get an equivalent pass until crafting runs, which is after dispatch).
+  factories = factories.map((f) => ({ ...f }));
 
-    const factory = factories.find((f) => {
-      const recipe = RECIPES[f.recipeId];
-      return node.resourceType in recipe.inputs && f.inputBuffer < FACTORY_INPUT_CAP;
-    });
-    if (!factory) continue;
+  // --- Dispatch: any producer (resource node or factory output) ships to
+  // whatever currently wants that resource type — another factory (keeps
+  // multi-stage chains like wood -> plank -> food flowing) or a house. ---
+  const producers: Producer[] = [
+    ...resourceNodes.map((n) => ({ id: n.id, x: n.x, y: n.y, resourceType: n.resourceType })),
+    ...factories
+      .filter((f) => f.outputBuffer > 0)
+      .map((f) => ({ id: f.id, x: f.x, y: f.y, resourceType: RECIPES[f.recipeId].output })),
+  ];
 
-    const path = findPath(grid, { x: node.x, y: node.y }, { x: factory.x, y: factory.y });
-    if (!path) continue;
+  for (const producer of producers) {
+    const isNode = resourceNodes.some((n) => n.id === producer.id);
+    const sourceBuffer = isNode
+      ? (resourceNodes.find((n) => n.id === producer.id)?.buffer ?? 0)
+      : (factories.find((f) => f.id === producer.id)?.outputBuffer ?? 0);
+    if (sourceBuffer <= 0) continue;
+    if (countInFlightFrom(shipments, producer.id) >= MAX_INFLIGHT_SHIPMENTS_PER_SOURCE) continue;
 
-    node.buffer -= 1;
-    shipments = [
-      ...shipments,
-      {
-        id: `shipment-${nextEntityId++}`,
-        kind: 'freight',
-        fromId: node.id,
-        toId: factory.id,
-        cargo: node.resourceType,
-        path,
-        pathIndex: 0,
-        subProgress: 0,
-        ticksInTransit: 0,
-      },
-    ];
-  }
-
-  // --- Dispatch: factory -> house (finished-good freight). ---
-  for (const factory of factories) {
-    if (factory.outputBuffer <= 0) continue;
-    if (countInFlightFrom(shipments, factory.id) >= MAX_INFLIGHT_SHIPMENTS_PER_SOURCE) continue;
-
-    const recipe = RECIPES[factory.recipeId];
-    const house = houses.find(
-      (h) => h.demand === recipe.output && h.demandBuffer < HOUSE_DEMAND_CAP,
+    const result = findConsumer(
+      grid,
+      { x: producer.x, y: producer.y },
+      producer.resourceType,
+      factories,
+      houses,
+      isNode ? undefined : producer.id,
     );
-    if (!house) continue;
+    if (!result) continue;
+    const { entity: consumer, path } = result;
 
-    const path = findPath(grid, { x: factory.x, y: factory.y }, { x: house.x, y: house.y });
-    if (!path) continue;
+    if (isNode) {
+      const node = resourceNodes.find((n) => n.id === producer.id);
+      if (node) node.buffer -= 1;
+    } else {
+      const factory = factories.find((f) => f.id === producer.id);
+      if (factory) factory.outputBuffer -= 1;
+    }
 
-    factory.outputBuffer -= 1;
     shipments = [
       ...shipments,
       {
         id: `shipment-${nextEntityId++}`,
         kind: 'freight',
-        fromId: factory.id,
-        toId: house.id,
-        cargo: recipe.output,
+        fromId: producer.id,
+        toId: consumer.id,
+        cargo: producer.resourceType,
         path,
         pathIndex: 0,
         subProgress: 0,
@@ -333,7 +395,7 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
   }
   shipments = movingShipments;
 
-  // --- Factories: receive raw material, craft on schedule. ---
+  // --- Factories: receive input, craft on schedule. ---
   factories = factories.map((f) => {
     const delivered = freightDeliveries.get(f.id) ?? 0;
     let inputBuffer = Math.min(FACTORY_INPUT_CAP, f.inputBuffer + delivered);
@@ -341,7 +403,7 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     let progress = f.progress;
 
     const recipe = RECIPES[f.recipeId];
-    const required = recipe.inputs.ore ?? 0;
+    const [, required] = Object.entries(recipe.inputs)[0] ?? [undefined, 0];
 
     if (inputBuffer >= required && outputBuffer < FACTORY_OUTPUT_CAP) {
       progress += 1;
@@ -356,14 +418,18 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
   });
 
   // --- Houses: receive goods, consume demand, credit commutes, update
-  // happiness, and pay tax proportional to happiness * population. ---
+  // happiness, and pay tax proportional to happiness * population. A
+  // house's first fulfilled widget demand unlocks the makeFood recipe. ---
   let taxIncome = 0;
   houses = houses.map((h) => {
     const delivered = freightDeliveries.get(h.id) ?? 0;
     let demandBuffer = Math.min(HOUSE_DEMAND_CAP, h.demandBuffer + delivered);
 
     const demandFulfilled = demandBuffer > 0;
-    if (demandFulfilled) demandBuffer -= 1;
+    if (demandFulfilled) {
+      demandBuffer -= 1;
+      if (h.demand === 'widget') unlockedRecipes.add('makeFood');
+    }
 
     const commuteSucceeded = (commuterArrivals.get(h.id) ?? 0) > 0;
 
@@ -400,5 +466,6 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     nextEntityId,
     money,
     congestion,
+    unlockedRecipes: [...unlockedRecipes],
   };
 }

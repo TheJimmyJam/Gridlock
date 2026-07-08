@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { GRID_COLS, GRID_ROWS } from '../sim/constants';
-import type { ResourceType, TileType, WorldState } from '../sim/types';
+import { RECIPES } from '../sim/recipes';
+import type { RecipeId, ResourceType, TileType, WorldState } from '../sim/types';
 import { gridToScreen, screenToGrid, TILE_HEIGHT, TILE_WIDTH } from './iso';
 import { saveWorldState } from './persistence';
 import { SimLoop } from './SimLoop';
@@ -16,12 +17,14 @@ export interface GridSceneData {
 }
 
 const TILE_COLORS: Record<Exclude<TileType, 'empty' | 'house' | 'road'>, number> = {
-  resourceNode: 0x4caf50,
+  resourceNode: 0x8d6e63,
+  forestNode: 0x2e7d32,
   factory: 0xff9800,
 };
 
 const SHIPMENT_COLORS: Record<ResourceType, number> = {
   ore: 0xffca28,
+  wood: 0x6d4c41,
   plank: 0xa1887f,
   widget: 0x9c27b0,
   food: 0xef5350,
@@ -64,6 +67,8 @@ export class GridScene extends Phaser.Scene {
   private labels = new Map<string, Phaser.GameObjects.Text>();
   private hudText!: Phaser.GameObjects.Text;
   private currentTool: Tool = 'road';
+  private selectedRecipeId: RecipeId = 'makeWidget';
+  private selectedDemand: ResourceType = 'widget';
 
   private isDragging = false;
   private pointerDownPos = new Phaser.Math.Vector2();
@@ -122,20 +127,32 @@ export class GridScene extends Phaser.Scene {
   }
 
   private drawHud(): void {
-    const { money, congestion } = this.simLoop.getState();
+    const { money, congestion, unlockedRecipes } = this.simLoop.getState();
     const toolLabel: Record<Tool, string> = {
       road: 'Road',
       resourceNode: 'Resource Node',
+      forestNode: 'Forest Node',
       factory: 'Factory',
       house: 'House',
     };
+
+    let toolDetail = '';
+    if (this.currentTool === 'factory')
+      toolDetail = ` (${this.selectedRecipeId}, press 3 to cycle)`;
+    if (this.currentTool === 'house')
+      toolDetail = ` (wants ${this.selectedDemand}, press 4 to cycle)`;
+
     this.hudText.setText(
       [
         `$${money.toFixed(0)}`,
         `congestion: ${congestion.toFixed(2)}`,
-        `tool [1-4]: ${toolLabel[this.currentTool]}`,
+        `tool [1-5]: ${toolLabel[this.currentTool]}${toolDetail}`,
+        `recipes: ${unlockedRecipes.join(', ')}`,
       ].join('   '),
     );
+    // scrollFactor(0) cancels scroll but not zoom -- counter-scale so the
+    // HUD reads at a constant screen size regardless of camera zoom.
+    this.hudText.setScale(1 / this.cameras.main.zoom);
   }
 
   private drawGridLines(): void {
@@ -223,17 +240,17 @@ export class GridScene extends Phaser.Scene {
 
     for (const node of resourceNodes) {
       seenIds.add(node.id);
-      const text = `ore:${node.buffer}`;
+      const text = `${node.resourceType}:${node.buffer}`;
       this.setLabel(node.id, text, node.x, node.y);
     }
     for (const factory of factories) {
       seenIds.add(factory.id);
-      const text = `in:${factory.inputBuffer} out:${factory.outputBuffer}`;
+      const text = `${factory.recipeId} in:${factory.inputBuffer} out:${factory.outputBuffer}`;
       this.setLabel(factory.id, text, factory.x, factory.y);
     }
     for (const house of houses) {
       seenIds.add(house.id);
-      const text = `♥${house.happiness} demand:${house.demandBuffer}`;
+      const text = `wants ${house.demand} ♥${house.happiness} have:${house.demandBuffer}`;
       this.setLabel(house.id, text, house.x, house.y);
     }
 
@@ -317,6 +334,22 @@ export class GridScene extends Phaser.Scene {
     if (existing?.type === this.currentTool) {
       // Clicking a tile that already has the selected tool's type removes it.
       this.simLoop.enqueue({ type: 'REMOVE_TILE', x: tileX, y: tileY });
+    } else if (this.currentTool === 'factory') {
+      this.simLoop.enqueue({
+        type: 'PLACE_TILE',
+        x: tileX,
+        y: tileY,
+        tileType: 'factory',
+        recipeId: this.selectedRecipeId,
+      });
+    } else if (this.currentTool === 'house') {
+      this.simLoop.enqueue({
+        type: 'PLACE_TILE',
+        x: tileX,
+        y: tileY,
+        tileType: 'house',
+        demand: this.selectedDemand,
+      });
     } else {
       this.simLoop.enqueue({ type: 'PLACE_TILE', x: tileX, y: tileY, tileType: this.currentTool });
     }
@@ -343,7 +376,31 @@ export class GridScene extends Phaser.Scene {
     this.input.mouse?.disableContextMenu();
     this.input.keyboard?.on('keydown-ONE', () => (this.currentTool = 'road'));
     this.input.keyboard?.on('keydown-TWO', () => (this.currentTool = 'resourceNode'));
-    this.input.keyboard?.on('keydown-THREE', () => (this.currentTool = 'factory'));
-    this.input.keyboard?.on('keydown-FOUR', () => (this.currentTool = 'house'));
+    this.input.keyboard?.on('keydown-THREE', () => {
+      if (this.currentTool === 'factory') {
+        this.selectedRecipeId = this.nextValue(
+          this.simLoop.getState().unlockedRecipes,
+          this.selectedRecipeId,
+        );
+      }
+      this.currentTool = 'factory';
+    });
+    this.input.keyboard?.on('keydown-FOUR', () => {
+      if (this.currentTool === 'house') {
+        const demands = [
+          ...new Set(this.simLoop.getState().unlockedRecipes.map((id) => RECIPES[id].output)),
+        ];
+        this.selectedDemand = this.nextValue(demands, this.selectedDemand);
+      }
+      this.currentTool = 'house';
+    });
+    this.input.keyboard?.on('keydown-FIVE', () => (this.currentTool = 'forestNode'));
+  }
+
+  /** Cycles to the value after `current` in `values`, wrapping around. */
+  private nextValue<T>(values: T[], current: T): T {
+    if (values.length === 0) return current;
+    const index = values.indexOf(current);
+    return values[(index + 1) % values.length] ?? values[0]!;
   }
 }

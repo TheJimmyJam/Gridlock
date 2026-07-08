@@ -1,4 +1,4 @@
-export type TileType = 'empty' | 'road' | 'resourceNode' | 'factory' | 'house';
+export type TileType = 'empty' | 'road' | 'resourceNode' | 'forestNode' | 'factory' | 'house';
 
 export interface Tile {
   x: number;
@@ -10,7 +10,7 @@ export interface Tile {
   load?: number;
 }
 
-export type ResourceType = 'ore' | 'plank' | 'widget' | 'food';
+export type ResourceType = 'ore' | 'wood' | 'plank' | 'widget' | 'food';
 
 export interface ResourceNode {
   id: string;
@@ -20,7 +20,7 @@ export interface ResourceNode {
   buffer: number;
 }
 
-export type RecipeId = 'makeWidget';
+export type RecipeId = 'makeWidget' | 'makePlank' | 'makeFood';
 
 export interface Recipe {
   inputs: Partial<Record<ResourceType, number>>;
@@ -78,8 +78,18 @@ export interface WorldState {
   money: number;
   /** Average load/capacity ratio across active road tiles. 0 = no traffic, 1 = at capacity. */
   congestion: number;
+  unlockedRecipes: RecipeId[];
 }
 
 export type Action =
-  | { type: 'PLACE_TILE'; x: number; y: number; tileType: Exclude<TileType, 'empty'> }
+  | {
+      type: 'PLACE_TILE';
+      x: number;
+      y: number;
+      tileType: Exclude<TileType, 'empty'>;
+      /** Only meaningful when tileType === 'factory'. Defaults to 'makeWidget'. */
+      recipeId?: RecipeId;
+      /** Only meaningful when tileType === 'house'. Defaults to 'widget'. */
+      demand?: ResourceType;
+    }
   | { type: 'REMOVE_TILE'; x: number; y: number };

@@ -1,4 +1,4 @@
-import type { TileType } from './types';
+import type { RecipeId, TileType } from './types';
 
 export const GRID_COLS = 200;
 export const GRID_ROWS = 200;
@@ -46,6 +46,10 @@ export const TAX_RATE_PER_POP_PER_TICK = 0.1;
 export const TILE_COSTS: Record<Exclude<TileType, 'empty'>, number> = {
   road: 5,
   resourceNode: 20,
+  forestNode: 20,
   factory: 100,
   house: 50,
 };
+
+// --- Phase 6: recipes/tech progression ---
+export const INITIAL_UNLOCKED_RECIPES: RecipeId[] = ['makeWidget', 'makePlank'];
