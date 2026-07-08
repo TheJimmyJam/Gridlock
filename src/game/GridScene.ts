@@ -135,7 +135,9 @@ export class GridScene extends Phaser.Scene {
     const tileY = Math.floor(worldPoint.y / TILE_SIZE);
     if (tileX < 0 || tileX >= GRID_COLS || tileY < 0 || tileY >= GRID_ROWS) return;
 
-    if (pointer.rightButtonDown()) {
+    const existing = this.simLoop.getState().grid[tileY]?.[tileX];
+    if (existing?.type === this.currentTool) {
+      // Clicking a tile that already has the selected tool's type removes it.
       this.simLoop.enqueue({ type: 'REMOVE_TILE', x: tileX, y: tileY });
     } else {
       this.simLoop.enqueue({ type: 'PLACE_TILE', x: tileX, y: tileY, tileType: this.currentTool });
