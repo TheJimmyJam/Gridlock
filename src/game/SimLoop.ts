@@ -11,12 +11,15 @@ export class SimLoop {
   private state: WorldState = createWorldState();
   private pendingActions: Action[] = [];
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private lastTickAt = performance.now();
 
   start(): void {
     if (this.intervalId !== null) return;
+    this.lastTickAt = performance.now();
     this.intervalId = setInterval(() => {
       this.state = tick(this.state, this.pendingActions);
       this.pendingActions = [];
+      this.lastTickAt = performance.now();
     }, TICK_INTERVAL_MS);
   }
 
@@ -32,5 +35,11 @@ export class SimLoop {
 
   getState(): WorldState {
     return this.state;
+  }
+
+  /** 0..1 progress toward the next tick, for render-side interpolation only. */
+  getInterpolationAlpha(): number {
+    const elapsed = performance.now() - this.lastTickAt;
+    return Math.min(1, elapsed / TICK_INTERVAL_MS);
   }
 }
