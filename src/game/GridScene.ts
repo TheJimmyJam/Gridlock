@@ -1,15 +1,21 @@
 import Phaser from 'phaser';
 import { GRID_COLS, GRID_ROWS } from '../sim/constants';
-import type { ResourceType, TileType } from '../sim/types';
+import type { ResourceType, TileType, WorldState } from '../sim/types';
 import { gridToScreen, screenToGrid, TILE_HEIGHT, TILE_WIDTH } from './iso';
+import { saveWorldState } from './persistence';
 import { SimLoop } from './SimLoop';
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 1.5;
 const CLICK_DRAG_THRESHOLD = 4; // px of pointer movement before a click counts as a pan
+const AUTOSAVE_INTERVAL_MS = 15_000;
 
-const TILE_COLORS: Record<Exclude<TileType, 'empty' | 'house'>, number> = {
-  road: 0x777777,
+export interface GridSceneData {
+  userId: string;
+  initialState?: WorldState;
+}
+
+const TILE_COLORS: Record<Exclude<TileType, 'empty' | 'house' | 'road'>, number> = {
   resourceNode: 0x4caf50,
   factory: 0xff9800,
 };
@@ -24,22 +30,39 @@ const SHIPMENT_COLORS: Record<ResourceType, number> = {
 const COMMUTER_COLOR = 0x42a5f5;
 const HOUSE_COLOR_UNHAPPY = 0xe53935;
 const HOUSE_COLOR_HAPPY = 0x66bb6a;
+const ROAD_COLOR_NORMAL = 0x777777;
+const ROAD_COLOR_CONGESTED = 0xe53935;
 
-type Tool = TileType;
+function interpolateColor(from: number, to: number, ratio: number): number {
+  const color = Phaser.Display.Color.Interpolate.ColorWithColor(
+    Phaser.Display.Color.ValueToColor(from),
+    Phaser.Display.Color.ValueToColor(to),
+    100,
+    Phaser.Math.Clamp(ratio, 0, 1) * 100,
+  );
+  return Phaser.Display.Color.GetColor(color.r, color.g, color.b);
+}
+
+type Tool = Exclude<TileType, 'empty'>;
 
 /**
- * Phase 2 scene, isometric projection: draws the grid, placed tiles,
- * in-transit shipments, and buffer labels from WorldState. Player input
- * enqueues actions on the SimLoop; it never mutates sim state directly.
- * All grid/tile math happens in plain orthogonal (col, row) space — this
- * file (via iso.ts) is the only place that translates to/from iso screen
- * coordinates. Placeholder shapes are flat diamonds, not real sprites.
+ * Isometric-projection scene: draws the grid, placed tiles, in-transit
+ * shipments, buffer labels, and a money/congestion HUD from WorldState.
+ * Player input enqueues actions on the SimLoop; it never mutates sim
+ * state directly. All grid/tile math happens in plain orthogonal
+ * (col, row) space — this file (via iso.ts) is the only place that
+ * translates to/from iso screen coordinates. Placeholder shapes are flat
+ * diamonds, not real sprites. Road tiles tint red as they congest; house
+ * tiles tint red as happiness drops.
  */
 export class GridScene extends Phaser.Scene {
-  private simLoop = new SimLoop();
+  private simLoop!: SimLoop;
+  private userId!: string;
+  private autosaveIntervalId: ReturnType<typeof setInterval> | null = null;
   private tilesGraphics!: Phaser.GameObjects.Graphics;
   private shipmentsGraphics!: Phaser.GameObjects.Graphics;
   private labels = new Map<string, Phaser.GameObjects.Text>();
+  private hudText!: Phaser.GameObjects.Text;
   private currentTool: Tool = 'road';
 
   private isDragging = false;
@@ -51,6 +74,11 @@ export class GridScene extends Phaser.Scene {
     super('GridScene');
   }
 
+  init(data: GridSceneData): void {
+    this.userId = data.userId;
+    this.simLoop = new SimLoop(data.initialState);
+  }
+
   create(): void {
     this.drawGridLines();
     this.tilesGraphics = this.add.graphics();
@@ -59,14 +87,55 @@ export class GridScene extends Phaser.Scene {
     this.setupPan();
     this.setupZoom();
     this.setupToolSelection();
+    this.setupHud();
+    this.setupAutosave();
     this.simLoop.start();
-    this.events.on('destroy', () => this.simLoop.stop());
+    this.events.on('destroy', () => {
+      this.simLoop.stop();
+      if (this.autosaveIntervalId !== null) clearInterval(this.autosaveIntervalId);
+    });
+  }
+
+  private setupAutosave(): void {
+    this.autosaveIntervalId = setInterval(() => {
+      void saveWorldState(this.userId, this.simLoop.getState());
+    }, AUTOSAVE_INTERVAL_MS);
   }
 
   update(): void {
     this.drawTiles();
     this.drawShipments();
     this.drawLabels();
+    this.drawHud();
+  }
+
+  private setupHud(): void {
+    this.hudText = this.add.text(0, 0, '', {
+      fontSize: '14px',
+      color: '#ffffff',
+      backgroundColor: '#000000aa',
+      padding: { x: 8, y: 6 },
+    });
+    this.hudText.setScrollFactor(0);
+    this.hudText.setPosition(12, 12);
+    this.hudText.setDepth(1000);
+  }
+
+  private drawHud(): void {
+    const { money, congestion } = this.simLoop.getState();
+    const toolLabel: Record<Tool, string> = {
+      road: 'Road',
+      resourceNode: 'Resource Node',
+      factory: 'Factory',
+      house: 'House',
+    };
+    this.hudText.setText(
+      [
+        `$${money.toFixed(0)}`,
+        `congestion: ${congestion.toFixed(2)}`,
+        `tool [1-4]: ${toolLabel[this.currentTool]}`,
+      ].join('   '),
+    );
   }
 
   private drawGridLines(): void {
@@ -110,14 +179,14 @@ export class GridScene extends Phaser.Scene {
         if (tile.type === 'house') {
           const house = houseByCoord.get(`${tile.x},${tile.y}`);
           const happiness = house?.happiness ?? 0;
-          const color = Phaser.Display.Color.Interpolate.ColorWithColor(
-            Phaser.Display.Color.ValueToColor(HOUSE_COLOR_UNHAPPY),
-            Phaser.Display.Color.ValueToColor(HOUSE_COLOR_HAPPY),
-            100,
-            happiness,
-          );
           this.tilesGraphics.fillStyle(
-            Phaser.Display.Color.GetColor(color.r, color.g, color.b),
+            interpolateColor(HOUSE_COLOR_UNHAPPY, HOUSE_COLOR_HAPPY, happiness / 100),
+            1,
+          );
+        } else if (tile.type === 'road') {
+          const ratio = (tile.load ?? 0) / (tile.roadCapacity ?? 1);
+          this.tilesGraphics.fillStyle(
+            interpolateColor(ROAD_COLOR_NORMAL, ROAD_COLOR_CONGESTED, ratio),
             1,
           );
         } else {

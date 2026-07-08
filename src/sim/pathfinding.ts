@@ -1,3 +1,4 @@
+import { CONGESTION_PATH_WEIGHT } from './constants';
 import type { Tile } from './types';
 
 export interface Point {
@@ -5,36 +6,63 @@ export interface Point {
   y: number;
 }
 
+function tileCost(grid: Tile[][], p: Point): number {
+  const tile = grid[p.y]?.[p.x];
+  if (tile?.type !== 'road') return 1;
+  const capacity = tile.roadCapacity ?? 1;
+  const load = tile.load ?? 0;
+  const overCapacityRatio = Math.max(0, load / capacity - 1);
+  return 1 + CONGESTION_PATH_WEIGHT * overCapacityRatio;
+}
+
 /**
- * BFS shortest path from `start` to `goal` over road tiles. `start` and
- * `goal` themselves don't need to be roads (they're a resource node / a
- * factory tile) — every tile in between must be a road.
+ * Shortest path from `start` to `goal` by cumulative tile cost (Dijkstra).
+ * `start`/`goal` don't need to be roads themselves (they're a resource
+ * node / factory / house tile) — every tile in between must be a road.
  *
- * All roads currently cost the same, so BFS finds the same result A*
- * would. Switch to real A* once road tiles carry congestion weights
- * (Phase 4) and shortest-by-cost stops being the same as shortest-by-hops.
+ * Cost is congestion-aware: an uncongested road costs 1, an overloaded
+ * one costs more. This is what makes "relieve congestion by widening or
+ * rerouting" an actual player lever — with uniform costs, every shipment
+ * between the same two points would always take the identical shortest
+ * path and a parallel road would never get used.
+ *
+ * Implementation note: linear-scan priority selection rather than a
+ * binary heap. Fine while road networks are small/sparse (only reachable
+ * road tiles enter `dist`, not the whole grid) — revisit if that stops
+ * being true.
  */
 export function findPath(grid: Tile[][], start: Point, goal: Point): Point[] | null {
   const key = (p: Point): string => `${p.x},${p.y}`;
-  const visited = new Set<string>([key(start)]);
+  const dist = new Map<string, number>([[key(start), 0]]);
   const cameFrom = new Map<string, Point>();
-  const queue: Point[] = [start];
+  const visited = new Set<string>();
 
   const rows = grid.length;
   const cols = rows > 0 ? (grid[0]?.length ?? 0) : 0;
 
   const isTraversable = (p: Point): boolean => {
     if (p.x === goal.x && p.y === goal.y) return true;
-    const row = grid[p.y];
-    const tile = row?.[p.x];
-    return tile?.type === 'road';
+    return grid[p.y]?.[p.x]?.type === 'road';
   };
 
-  while (queue.length > 0) {
-    const current = queue.shift() as Point;
+  while (true) {
+    let currentKey: string | null = null;
+    let currentDist = Infinity;
+    for (const [k, d] of dist) {
+      if (!visited.has(k) && d < currentDist) {
+        currentDist = d;
+        currentKey = k;
+      }
+    }
+    if (currentKey === null) return null;
+
+    const [cxStr, cyStr] = currentKey.split(',');
+    const current: Point = { x: Number(cxStr), y: Number(cyStr) };
+
     if (current.x === goal.x && current.y === goal.y) {
       return reconstructPath(cameFrom, current, key);
     }
+    visited.add(currentKey);
 
     const neighbors: Point[] = [
       { x: current.x + 1, y: current.y },
@@ -45,16 +73,17 @@ export function findPath(grid: Tile[][], start: Point, goal: Point): Point[] | n
 
     for (const next of neighbors) {
       if (next.x < 0 || next.x >= cols || next.y < 0 || next.y >= rows) continue;
-      const k = key(next);
-      if (visited.has(k)) continue;
       if (!isTraversable(next)) continue;
-      visited.add(k);
-      cameFrom.set(k, current);
-      queue.push(next);
+      const nk = key(next);
+      if (visited.has(nk)) continue;
+
+      const newDist = currentDist + tileCost(grid, next);
+      if (newDist < (dist.get(nk) ?? Infinity)) {
+        dist.set(nk, newDist);
+        cameFrom.set(nk, current);
+      }
     }
   }
-
-  return null;
 }
 
 function reconstructPath(

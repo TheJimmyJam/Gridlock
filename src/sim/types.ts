@@ -4,6 +4,10 @@ export interface Tile {
   x: number;
   y: number;
   type: TileType;
+  /** Only set for road tiles. */
+  roadCapacity?: number;
+  /** Only set for road tiles; recomputed fresh every tick from shipment positions. */
+  load?: number;
 }
 
 export type ResourceType = 'ore' | 'plank' | 'widget' | 'food';
@@ -44,6 +48,7 @@ export interface House {
   happiness: number;
   ticksSinceDemandFulfilled: number;
   ticksSinceCommute: number;
+  population: number;
 }
 
 export type ShipmentKind = 'freight' | 'commuter';
@@ -56,6 +61,10 @@ export interface Shipment {
   cargo?: ResourceType;
   path: { x: number; y: number }[];
   pathIndex: number;
+  /** 0..1 progress toward the next tile in the path. Sim-authoritative;
+   * advances by less than 1 per tick when the current tile is congested. */
+  subProgress: number;
+  ticksInTransit: number;
 }
 
 export interface WorldState {
@@ -66,8 +75,11 @@ export interface WorldState {
   houses: House[];
   shipments: Shipment[];
   nextEntityId: number;
+  money: number;
+  /** Average load/capacity ratio across active road tiles. 0 = no traffic, 1 = at capacity. */
+  congestion: number;
 }
 
 export type Action =
-  | { type: 'PLACE_TILE'; x: number; y: number; tileType: TileType }
+  | { type: 'PLACE_TILE'; x: number; y: number; tileType: Exclude<TileType, 'empty'> }
   | { type: 'REMOVE_TILE'; x: number; y: number };

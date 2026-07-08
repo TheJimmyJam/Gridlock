@@ -10,12 +10,18 @@ import {
   HOUSE_COMMUTE_CAP,
   HOUSE_DEMAND_CAP,
   HOUSE_INITIAL_HAPPINESS,
+  HOUSE_POPULATION,
   MAX_INFLIGHT_SHIPMENTS_PER_SOURCE,
+  MAX_TRIP_TICKS,
   NODE_BUFFER_CAP,
+  ROAD_CAPACITY,
+  STARTING_MONEY,
+  TAX_RATE_PER_POP_PER_TICK,
+  TILE_COSTS,
 } from './constants';
 import { findPath } from './pathfinding';
 import { RECIPES } from './recipes';
-import type { Action, Factory, House, ResourceNode, Shipment, Tile, WorldState } from './types';
+import type { Action, Factory, Shipment, Tile, WorldState } from './types';
 
 export function createWorldState(): WorldState {
   const grid: Tile[][] = [];
@@ -34,23 +40,13 @@ export function createWorldState(): WorldState {
     houses: [],
     shipments: [],
     nextEntityId: 1,
+    money: STARTING_MONEY,
+    congestion: 0,
   };
 }
 
 function inBounds(x: number, y: number): boolean {
   return x >= 0 && x < GRID_COLS && y >= 0 && y < GRID_ROWS;
-}
-
-function applyTileAction(grid: Tile[][], action: Action): void {
-  if (!inBounds(action.x, action.y)) return;
-  const row = grid[action.y];
-  if (!row) return;
-
-  if (action.type === 'PLACE_TILE') {
-    row[action.x] = { x: action.x, y: action.y, type: action.tileType };
-  } else if (action.type === 'REMOVE_TILE') {
-    row[action.x] = { x: action.x, y: action.y, type: 'empty' };
-  }
 }
 
 function countInFlightFrom(shipments: Shipment[], sourceId: string): number {
@@ -65,47 +61,79 @@ function countInFlightFrom(shipments: Shipment[], sourceId: string): number {
 export function tick(state: WorldState, actions: Action[]): WorldState {
   const grid = state.grid.map((row) => row.slice());
   let nextEntityId = state.nextEntityId;
+  let money = state.money;
   let resourceNodes = state.resourceNodes.slice();
   let factories = state.factories.slice();
   let houses = state.houses.slice();
 
+  // --- Apply actions: place/remove tiles + entities. Placement costs
+  // money; if the player can't afford it, the action is silently a no-op
+  // (the "soft fail when broke" — nothing breaks, you just can't build). ---
   for (const action of actions) {
-    applyTileAction(grid, action);
+    if (!inBounds(action.x, action.y)) continue;
+    const row = grid[action.y];
+    if (!row) continue;
 
-    if (action.type === 'PLACE_TILE' && action.tileType === 'resourceNode') {
-      const node: ResourceNode = {
-        id: `node-${nextEntityId++}`,
-        x: action.x,
-        y: action.y,
-        resourceType: 'ore',
-        buffer: 0,
-      };
-      resourceNodes = [...resourceNodes, node];
-    } else if (action.type === 'PLACE_TILE' && action.tileType === 'factory') {
-      const factory: Factory = {
-        id: `factory-${nextEntityId++}`,
-        x: action.x,
-        y: action.y,
-        recipeId: 'makeWidget',
-        inputBuffer: 0,
-        outputBuffer: 0,
-        progress: 0,
-      };
-      factories = [...factories, factory];
-    } else if (action.type === 'PLACE_TILE' && action.tileType === 'house') {
-      const house: House = {
-        id: `house-${nextEntityId++}`,
-        x: action.x,
-        y: action.y,
-        demand: RECIPES.makeWidget.output,
-        demandBuffer: 0,
-        commuteBuffer: 0,
-        happiness: HOUSE_INITIAL_HAPPINESS,
-        ticksSinceDemandFulfilled: 0,
-        ticksSinceCommute: 0,
-      };
-      houses = [...houses, house];
+    if (action.type === 'PLACE_TILE') {
+      const cost = TILE_COSTS[action.tileType];
+      if (money < cost) continue;
+      money -= cost;
+
+      if (action.tileType === 'road') {
+        row[action.x] = {
+          x: action.x,
+          y: action.y,
+          type: 'road',
+          roadCapacity: ROAD_CAPACITY,
+          load: 0,
+        };
+      } else {
+        row[action.x] = { x: action.x, y: action.y, type: action.tileType };
+      }
+
+      if (action.tileType === 'resourceNode') {
+        resourceNodes = [
+          ...resourceNodes,
+          {
+            id: `node-${nextEntityId++}`,
+            x: action.x,
+            y: action.y,
+            resourceType: 'ore',
+            buffer: 0,
+          },
+        ];
+      } else if (action.tileType === 'factory') {
+        factories = [
+          ...factories,
+          {
+            id: `factory-${nextEntityId++}`,
+            x: action.x,
+            y: action.y,
+            recipeId: 'makeWidget',
+            inputBuffer: 0,
+            outputBuffer: 0,
+            progress: 0,
+          },
+        ];
+      } else if (action.tileType === 'house') {
+        houses = [
+          ...houses,
+          {
+            id: `house-${nextEntityId++}`,
+            x: action.x,
+            y: action.y,
+            demand: RECIPES.makeWidget.output,
+            demandBuffer: 0,
+            commuteBuffer: 0,
+            happiness: HOUSE_INITIAL_HAPPINESS,
+            ticksSinceDemandFulfilled: 0,
+            ticksSinceCommute: 0,
+            population: HOUSE_POPULATION,
+          },
+        ];
+      }
     } else if (action.type === 'REMOVE_TILE') {
+      row[action.x] = { x: action.x, y: action.y, type: 'empty' };
       resourceNodes = resourceNodes.filter((n) => n.x !== action.x || n.y !== action.y);
       factories = factories.filter((f) => f.x !== action.x || f.y !== action.y);
       houses = houses.filter((h) => h.x !== action.x || h.y !== action.y);
@@ -121,6 +149,36 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
   let shipments = state.shipments.filter(
     (s) => liveEntityIds.has(s.fromId) && liveEntityIds.has(s.toId),
   );
+
+  // --- Congestion: snapshot how many shipments currently occupy each
+  // road tile, write it back onto the tile (for rendering + next tick's
+  // pathfinding), and compute the aggregate congestion metric. ---
+  const loadByTile = new Map<string, number>();
+  for (const shipment of shipments) {
+    const at = shipment.path[shipment.pathIndex];
+    if (!at) continue;
+    const key = `${at.x},${at.y}`;
+    loadByTile.set(key, (loadByTile.get(key) ?? 0) + 1);
+  }
+
+  let congestionRatioSum = 0;
+  let activeRoadTiles = 0;
+  for (let y = 0; y < grid.length; y++) {
+    const row = grid[y];
+    if (!row) continue;
+    for (let x = 0; x < row.length; x++) {
+      const tile = row[x];
+      if (!tile || tile.type !== 'road') continue;
+      const load = loadByTile.get(`${x},${y}`) ?? 0;
+      if (load === tile.load) continue;
+      row[x] = { ...tile, load };
+      if (load > 0) {
+        congestionRatioSum += load / (tile.roadCapacity ?? ROAD_CAPACITY);
+        activeRoadTiles += 1;
+      }
+    }
+  }
+  const congestion = activeRoadTiles > 0 ? congestionRatioSum / activeRoadTiles : 0;
 
   // --- Production: resource nodes accumulate raw material. ---
   resourceNodes = resourceNodes.map((n) => ({
@@ -159,6 +217,8 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
         cargo: node.resourceType,
         path,
         pathIndex: 0,
+        subProgress: 0,
+        ticksInTransit: 0,
       },
     ];
   }
@@ -188,6 +248,8 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
         cargo: recipe.output,
         path,
         pathIndex: 0,
+        subProgress: 0,
+        ticksInTransit: 0,
       },
     ];
   }
@@ -201,7 +263,11 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     let job: Factory | undefined;
     let path: ReturnType<typeof findPath> = null;
     for (const candidate of factories) {
-      const candidatePath = findPath(grid, { x: house.x, y: house.y }, { x: candidate.x, y: candidate.y });
+      const candidatePath = findPath(
+        grid,
+        { x: house.x, y: house.y },
+        { x: candidate.x, y: candidate.y },
+      );
       if (candidatePath) {
         job = candidate;
         path = candidatePath;
@@ -220,24 +286,49 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
         toId: job.id,
         path,
         pathIndex: 0,
+        subProgress: 0,
+        ticksInTransit: 0,
       },
     ];
   }
 
-  // --- Move every shipment one step; collect arrivals. ---
+  // --- Move every shipment, respecting congestion; collect arrivals and
+  // time out trips that have been stuck too long. ---
   const freightDeliveries = new Map<string, number>(); // keyed by toId (factory or house)
   const commuterArrivals = new Map<string, number>(); // keyed by fromId (the house that commuted)
   const movingShipments: Shipment[] = [];
+
   for (const shipment of shipments) {
-    const nextIndex = shipment.pathIndex + 1;
-    if (nextIndex >= shipment.path.length) {
+    const ticksInTransit = shipment.ticksInTransit + 1;
+    if (ticksInTransit > MAX_TRIP_TICKS) {
+      // Trip timeout: cargo is lost / commuter never arrives. No delivery
+      // credit — this is what lets the cascade actually show up as failed
+      // deliveries and failed commutes, not just slow ones.
+      continue;
+    }
+
+    const at = shipment.path[shipment.pathIndex];
+    const atTile = at ? grid[at.y]?.[at.x] : undefined;
+    const speed =
+      atTile?.type === 'road'
+        ? Math.min(1, (atTile.roadCapacity ?? ROAD_CAPACITY) / Math.max(1, atTile.load ?? 0))
+        : 1;
+
+    let pathIndex = shipment.pathIndex;
+    let subProgress = shipment.subProgress + speed;
+    if (subProgress >= 1) {
+      pathIndex += 1;
+      subProgress -= 1;
+    }
+
+    if (pathIndex >= shipment.path.length - 1) {
       if (shipment.kind === 'freight') {
         freightDeliveries.set(shipment.toId, (freightDeliveries.get(shipment.toId) ?? 0) + 1);
       } else {
         commuterArrivals.set(shipment.fromId, (commuterArrivals.get(shipment.fromId) ?? 0) + 1);
       }
     } else {
-      movingShipments.push({ ...shipment, pathIndex: nextIndex });
+      movingShipments.push({ ...shipment, pathIndex, subProgress, ticksInTransit });
     }
   }
   shipments = movingShipments;
@@ -264,7 +355,9 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     return { ...f, inputBuffer, outputBuffer, progress };
   });
 
-  // --- Houses: receive goods, consume demand, credit commutes, update happiness. ---
+  // --- Houses: receive goods, consume demand, credit commutes, update
+  // happiness, and pay tax proportional to happiness * population. ---
+  let taxIncome = 0;
   houses = houses.map((h) => {
     const delivered = freightDeliveries.get(h.id) ?? 0;
     let demandBuffer = Math.min(HOUSE_DEMAND_CAP, h.demandBuffer + delivered);
@@ -275,8 +368,9 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     const commuteSucceeded = (commuterArrivals.get(h.id) ?? 0) > 0;
 
     // Deliveries/commutes are bursty by nature (production takes several
-    // ticks), so happiness only reacts to actual events, and only decays
-    // once a house has gone too long without one — not on every idle tick.
+    // ticks, congestion adds more delay), so happiness only reacts to
+    // actual events, and only decays once a house has gone too long
+    // without one — not on every idle tick.
     const ticksSinceDemandFulfilled = demandFulfilled ? 0 : h.ticksSinceDemandFulfilled + 1;
     const ticksSinceCommute = commuteSucceeded ? 0 : h.ticksSinceCommute + 1;
 
@@ -290,8 +384,11 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
       happiness = Math.max(HAPPINESS_MIN, happiness - HAPPINESS_STEP);
     }
 
+    taxIncome += h.population * (happiness / HAPPINESS_MAX) * TAX_RATE_PER_POP_PER_TICK;
+
     return { ...h, demandBuffer, happiness, ticksSinceDemandFulfilled, ticksSinceCommute };
   });
+  money += taxIncome;
 
   return {
     tick: state.tick + 1,
@@ -301,5 +398,7 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     houses,
     shipments,
     nextEntityId,
+    money,
+    congestion,
   };
 }

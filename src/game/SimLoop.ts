@@ -8,10 +8,14 @@ import { createWorldState, tick } from '../sim/world';
  * only ever reads getState(); it never mutates sim state directly.
  */
 export class SimLoop {
-  private state: WorldState = createWorldState();
+  private state: WorldState;
   private pendingActions: Action[] = [];
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private lastTickAt = performance.now();
+
+  constructor(initialState?: WorldState) {
+    this.state = initialState ?? createWorldState();
+  }
 
   start(): void {
     if (this.intervalId !== null) return;

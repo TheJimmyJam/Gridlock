@@ -1,3 +1,5 @@
+import type { TileType } from './types';
+
 export const GRID_COLS = 200;
 export const GRID_ROWS = 200;
 
@@ -22,3 +24,28 @@ export const HAPPINESS_MAX = 100;
  * healthily-connected house trends up, not down on noise.
  */
 export const HAPPINESS_IDLE_THRESHOLD_TICKS = 20;
+
+// --- Phase 4: congestion ---
+export const ROAD_CAPACITY = 3;
+/** A trip stuck in transit longer than this fails outright (cargo lost / commuter never arrives). */
+export const MAX_TRIP_TICKS = 200;
+/**
+ * Extra pathfinding cost added per unit a road tile is over capacity.
+ * This is what makes "widen the road" or "build a parallel route" an
+ * actual lever — without a congestion-aware cost, every shipment between
+ * the same two points would always take the identical shortest path.
+ */
+export const CONGESTION_PATH_WEIGHT = 2;
+
+// --- Phase 4: economy ---
+export const STARTING_MONEY = 1000;
+export const HOUSE_POPULATION = 4;
+/** Placeholder balance value — will need tuning once the game is playable. */
+export const TAX_RATE_PER_POP_PER_TICK = 0.1;
+
+export const TILE_COSTS: Record<Exclude<TileType, 'empty'>, number> = {
+  road: 5,
+  resourceNode: 20,
+  factory: 100,
+  house: 50,
+};

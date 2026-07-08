@@ -7,10 +7,86 @@
     <style>
       html, body { margin: 0; padding: 0; overflow: hidden; background: #111; }
       #app { width: 100vw; height: 100vh; }
+
+      #auth-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #111;
+        font-family: system-ui, sans-serif;
+        color: #eee;
+        z-index: 10;
+      }
+      #auth-overlay.hidden { display: none; }
+      #auth-box {
+        background: #1c1c1c;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 32px;
+        width: 280px;
+      }
+      #auth-box h1 { font-size: 20px; margin: 0 0 16px; }
+      #auth-box input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        margin-bottom: 10px;
+        background: #111;
+        border: 1px solid #444;
+        border-radius: 4px;
+        color: #eee;
+        font-size: 14px;
+      }
+      #auth-box button {
+        width: 100%;
+        padding: 8px;
+        margin-top: 4px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      #auth-sign-in { background: #4caf50; color: #fff; }
+      #auth-sign-up { background: #333; color: #eee; }
+      #auth-error { color: #ef5350; font-size: 12px; margin-top: 8px; min-height: 14px; }
+      #auth-status { color: #999; font-size: 12px; margin-top: 8px; min-height: 14px; }
+
+      #sign-out-btn {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 5;
+        display: none;
+        padding: 6px 12px;
+        background: #000000aa;
+        color: #eee;
+        border: 1px solid #444;
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
+
+    <div id="auth-overlay">
+      <div id="auth-box">
+        <h1>Gridlock</h1>
+        <input id="auth-email" type="email" placeholder="Email" autocomplete="email" />
+        <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password" />
+        <button id="auth-sign-in">Sign in</button>
+        <button id="auth-sign-up">Create account</button>
+        <div id="auth-error"></div>
+        <div id="auth-status"></div>
+      </div>
+    </div>
+
+    <button id="sign-out-btn">Sign out</button>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
