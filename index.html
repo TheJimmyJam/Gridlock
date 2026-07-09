@@ -69,6 +69,29 @@
         font-size: 13px;
       }
 
+      #zoom-controls {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .zoom-btn {
+        width: 36px;
+        height: 36px;
+        background: #000000aa;
+        color: #eee;
+        border: 1px solid #444;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 18px;
+        font-family: system-ui, sans-serif;
+        line-height: 1;
+      }
+      .zoom-btn:hover { background: #333; }
+
       #build-hud {
         position: fixed;
         bottom: 16px;
@@ -127,6 +150,11 @@
     </div>
 
     <button id="sign-out-btn">Sign out</button>
+
+    <div id="zoom-controls">
+      <button id="zoom-in-btn" class="zoom-btn" type="button" aria-label="Zoom in">+</button>
+      <button id="zoom-out-btn" class="zoom-btn" type="button" aria-label="Zoom out">−</button>
+    </div>
 
     <div id="build-hud">
       <button class="build-btn" data-tool="road">🛣️ Road</button>

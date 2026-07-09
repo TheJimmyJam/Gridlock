@@ -522,30 +522,34 @@ export class GridScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Trackpad/wheel zoom used to anchor on the cursor position, but rapid
+   * wheel events (trackpads fire dozens per gesture) could compound
+   * floating-point drift in the scroll correction and fling the camera
+   * away from what you'd built -- content appeared to "disappear." Discrete
+   * +/- buttons anchored on the viewport center sidestep that entirely:
+   * one deliberate step per click, same before/after-getWorldPoint anchor
+   * math but computed once instead of dozens of times per second.
+   */
   private setupZoom(): void {
-    this.input.on(
-      'wheel',
-      (
-        pointer: Phaser.Input.Pointer,
-        _gameObjects: Phaser.GameObjects.GameObject[],
-        _deltaX: number,
-        deltaY: number,
-      ) => {
-        const camera = this.cameras.main;
-        const zoomFactor = deltaY > 0 ? 0.9 : 1.1;
-        const newZoom = Phaser.Math.Clamp(camera.zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM);
-        if (newZoom === camera.zoom) return;
+    const zoomInBtn = document.getElementById('zoom-in-btn');
+    const zoomOutBtn = document.getElementById('zoom-out-btn');
+    zoomInBtn?.addEventListener('click', () => this.stepZoom(1.25));
+    zoomOutBtn?.addEventListener('click', () => this.stepZoom(0.8));
+  }
 
-        // Anchor the zoom on the cursor: capture the world point under the
-        // pointer before zooming, then shift scroll so that same world
-        // point stays under the pointer after zooming.
-        const worldPointBefore = camera.getWorldPoint(pointer.x, pointer.y);
-        camera.setZoom(newZoom);
-        const worldPointAfter = camera.getWorldPoint(pointer.x, pointer.y);
-        camera.scrollX += worldPointBefore.x - worldPointAfter.x;
-        camera.scrollY += worldPointBefore.y - worldPointAfter.y;
-      },
-    );
+  private stepZoom(factor: number): void {
+    const camera = this.cameras.main;
+    const newZoom = Phaser.Math.Clamp(camera.zoom * factor, MIN_ZOOM, MAX_ZOOM);
+    if (newZoom === camera.zoom) return;
+
+    const centerX = this.scale.width / 2;
+    const centerY = this.scale.height / 2;
+    const worldPointBefore = camera.getWorldPoint(centerX, centerY);
+    camera.setZoom(newZoom);
+    const worldPointAfter = camera.getWorldPoint(centerX, centerY);
+    camera.scrollX += worldPointBefore.x - worldPointAfter.x;
+    camera.scrollY += worldPointBefore.y - worldPointAfter.y;
   }
 
   /** Keyboard shortcuts 1-5 remain as a fast path; the build HUD buttons do the same thing. */
