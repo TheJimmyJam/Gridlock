@@ -37,8 +37,42 @@ const SHIPMENT_COLORS: Record<ResourceType, number> = {
 const COMMUTER_COLOR = 0x42a5f5;
 const HOUSE_COLOR_UNHAPPY = 0xe53935;
 const HOUSE_COLOR_HAPPY = 0x66bb6a;
-const ROAD_COLOR_NORMAL = 0x777777;
 const ROAD_COLOR_CONGESTED = 0xe53935;
+
+/** Source art canvases are square with padding around the diamond; this is
+ * the display size (px) that makes the diamond within them match the grid's
+ * TILE_WIDTH/TILE_HEIGHT footprint. */
+const TILE_SPRITE_SIZE = 136;
+
+type Direction = 'N' | 'S' | 'E' | 'W';
+
+/** Rotation (degrees) for each 2-connection combo the road art covers.
+ * road_straight connects the opposite pair baked into its art at 0deg
+ * (W+E); road_corner connects an adjacent pair at 0deg (S+E). Rotating in
+ * 90deg steps cycles the connected pair through N->E->S->W. Best-effort --
+ * nudge these if a piece renders rotated wrong once it's on screen. */
+const STRAIGHT_ROTATIONS: Record<string, number> = {
+  'E,W': 0,
+  'N,S': 90,
+};
+const CORNER_ROTATIONS: Record<string, number> = {
+  'E,S': 0,
+  'S,W': 90,
+  'N,W': 180,
+  'E,N': 270,
+};
+const ENDCAP_ROTATIONS: Record<string, number> = {
+  S: 0,
+  W: 90,
+  N: 180,
+  E: 270,
+};
+const TJUNCTION_ROTATIONS: Record<string, number> = {
+  'E,S,W': 0,
+  'N,S,W': 90,
+  'E,N,W': 180,
+  'E,N,S': 270,
+};
 
 function interpolateColor(from: number, to: number, ratio: number): number {
   const color = Phaser.Display.Color.Interpolate.ColorWithColor(
@@ -69,6 +103,11 @@ export class GridScene extends Phaser.Scene {
   private gridLinesGraphics!: Phaser.GameObjects.Graphics;
   private tilesGraphics!: Phaser.GameObjects.Graphics;
   private shipmentsGraphics!: Phaser.GameObjects.Graphics;
+  /** Sprites for tile types that have real art (resourceNode, forestNode,
+   * road). Pooled by "x,y" key and reused across frames; house/factory/
+   * service still fall back to the flat colored diamonds in tilesGraphics
+   * since there's no art for those yet. */
+  private tileSprites = new Map<string, Phaser.GameObjects.Image>();
   private labels = new Map<string, Phaser.GameObjects.Text>();
   private hudText!: Phaser.GameObjects.Text;
   /** Non-zooming camera dedicated to fixed-position UI (the stats HUD). */
@@ -90,6 +129,16 @@ export class GridScene extends Phaser.Scene {
   init(data: GridSceneData): void {
     this.userId = data.userId;
     this.simLoop = new SimLoop(data.initialState);
+  }
+
+  preload(): void {
+    this.load.image('terrain_rock_cluster', 'assets/tiles/terrain_rock_cluster.png');
+    this.load.image('terrain_tree_cluster', 'assets/tiles/terrain_tree_cluster.png');
+    this.load.image('road_straight', 'assets/tiles/road_straight.png');
+    this.load.image('road_corner', 'assets/tiles/road_corner.png');
+    this.load.image('road_endcap', 'assets/tiles/road_endcap.png');
+    this.load.image('road_tjunction', 'assets/tiles/road_tjunction.png');
+    this.load.image('road_4way', 'assets/tiles/road_4way.png');
   }
 
   create(): void {
@@ -202,22 +251,39 @@ export class GridScene extends Phaser.Scene {
     this.tilesGraphics.clear();
     const { grid, houses, services } = this.simLoop.getState();
     const houseByCoord = new Map(houses.map((h) => [`${h.x},${h.y}`, h]));
+    const seenSpriteCoords = new Set<string>();
 
     for (const row of grid) {
       for (const tile of row) {
         if (tile.type === 'empty') continue;
+
+        if (tile.type === 'resourceNode') {
+          this.setTileSprite(tile.x, tile.y, 'terrain_rock_cluster', 0);
+          seenSpriteCoords.add(`${tile.x},${tile.y}`);
+          continue;
+        }
+        if (tile.type === 'forestNode') {
+          this.setTileSprite(tile.x, tile.y, 'terrain_tree_cluster', 0);
+          seenSpriteCoords.add(`${tile.x},${tile.y}`);
+          continue;
+        }
+        if (tile.type === 'road') {
+          const roadSprite = this.getRoadSprite(tile.x, tile.y, grid);
+          const sprite = this.setTileSprite(tile.x, tile.y, roadSprite.texture, roadSprite.angle);
+          // Congestion feedback was the one thing players could already read
+          // off the old flat tiles -- keep it by tinting the road art toward
+          // red as load approaches capacity, instead of losing the signal.
+          const ratio = (tile.load ?? 0) / (tile.roadCapacity ?? 1);
+          sprite.setTint(interpolateColor(0xffffff, ROAD_COLOR_CONGESTED, ratio));
+          seenSpriteCoords.add(`${tile.x},${tile.y}`);
+          continue;
+        }
 
         if (tile.type === 'house') {
           const house = houseByCoord.get(`${tile.x},${tile.y}`);
           const happiness = house?.happiness ?? 0;
           this.tilesGraphics.fillStyle(
             interpolateColor(HOUSE_COLOR_UNHAPPY, HOUSE_COLOR_HAPPY, happiness / 100),
-            1,
-          );
-        } else if (tile.type === 'road') {
-          const ratio = (tile.load ?? 0) / (tile.roadCapacity ?? 1);
-          this.tilesGraphics.fillStyle(
-            interpolateColor(ROAD_COLOR_NORMAL, ROAD_COLOR_CONGESTED, ratio),
             1,
           );
         } else {
@@ -234,6 +300,76 @@ export class GridScene extends Phaser.Scene {
         }
       }
     }
+
+    // Drop sprites for tiles that no longer have art-backed content
+    // (removed, or changed to a type without art).
+    for (const [key, sprite] of this.tileSprites) {
+      if (!seenSpriteCoords.has(key)) {
+        sprite.destroy();
+        this.tileSprites.delete(key);
+      }
+    }
+  }
+
+  private setTileSprite(
+    gx: number,
+    gy: number,
+    texture: string,
+    angle: number,
+  ): Phaser.GameObjects.Image {
+    const key = `${gx},${gy}`;
+    let sprite = this.tileSprites.get(key);
+    if (!sprite) {
+      sprite = this.add.image(0, 0, texture);
+      sprite.setDisplaySize(TILE_SPRITE_SIZE, TILE_SPRITE_SIZE);
+      this.uiCamera.ignore(sprite);
+      this.tileSprites.set(key, sprite);
+    } else if (sprite.texture.key !== texture) {
+      sprite.setTexture(texture);
+    }
+    const center = gridToScreen(gx + 0.5, gy + 0.5);
+    sprite.setPosition(center.x, center.y);
+    sprite.setAngle(angle);
+    sprite.clearTint();
+    return sprite;
+  }
+
+  /** Picks the road piece + rotation matching this tile's live neighbor
+   * connections. The full kit (endcap/straight/corner/T/4-way) covers every
+   * connection count 0-4, so this always returns art -- no flat-color
+   * fallback needed anymore. Rotation angles are a best-effort reverse
+   * engineering of the source art's orientation; if a piece looks rotated
+   * wrong once it's on screen, it's a one-line fix to the *_ROTATIONS
+   * tables above. */
+  private getRoadSprite(
+    gx: number,
+    gy: number,
+    grid: WorldState['grid'],
+  ): { texture: string; angle: number } {
+    const isRoad = (x: number, y: number): boolean => grid[y]?.[x]?.type === 'road';
+    const connections: Direction[] = [];
+    if (isRoad(gx, gy - 1)) connections.push('N');
+    if (isRoad(gx, gy + 1)) connections.push('S');
+    if (isRoad(gx + 1, gy)) connections.push('E');
+    if (isRoad(gx - 1, gy)) connections.push('W');
+
+    if (connections.length === 0) {
+      return { texture: 'road_straight', angle: STRAIGHT_ROTATIONS['E,W']! };
+    }
+    if (connections.length === 1) {
+      return { texture: 'road_endcap', angle: ENDCAP_ROTATIONS[connections[0]!]! };
+    }
+    const key = [...connections].sort().join(',');
+    if (connections.length === 2) {
+      if (key in STRAIGHT_ROTATIONS) {
+        return { texture: 'road_straight', angle: STRAIGHT_ROTATIONS[key]! };
+      }
+      return { texture: 'road_corner', angle: CORNER_ROTATIONS[key]! };
+    }
+    if (connections.length === 3) {
+      return { texture: 'road_tjunction', angle: TJUNCTION_ROTATIONS[key]! };
+    }
+    return { texture: 'road_4way', angle: 0 };
   }
 
   private isServiceCovered(
@@ -390,7 +526,7 @@ export class GridScene extends Phaser.Scene {
     this.input.on(
       'wheel',
       (
-        _pointer: Phaser.Input.Pointer,
+        pointer: Phaser.Input.Pointer,
         _gameObjects: Phaser.GameObjects.GameObject[],
         _deltaX: number,
         deltaY: number,
@@ -398,7 +534,16 @@ export class GridScene extends Phaser.Scene {
         const camera = this.cameras.main;
         const zoomFactor = deltaY > 0 ? 0.9 : 1.1;
         const newZoom = Phaser.Math.Clamp(camera.zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM);
+        if (newZoom === camera.zoom) return;
+
+        // Anchor the zoom on the cursor: capture the world point under the
+        // pointer before zooming, then shift scroll so that same world
+        // point stays under the pointer after zooming.
+        const worldPointBefore = camera.getWorldPoint(pointer.x, pointer.y);
         camera.setZoom(newZoom);
+        const worldPointAfter = camera.getWorldPoint(pointer.x, pointer.y);
+        camera.scrollX += worldPointBefore.x - worldPointAfter.x;
+        camera.scrollY += worldPointBefore.y - worldPointAfter.y;
       },
     );
   }
