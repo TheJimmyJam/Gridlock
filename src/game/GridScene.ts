@@ -41,38 +41,9 @@ const ROAD_COLOR_CONGESTED = 0xe53935;
 
 /** Source art canvases are square with padding around the diamond; this is
  * the display size (px) that makes the diamond within them match the grid's
- * TILE_WIDTH/TILE_HEIGHT footprint. */
+ * TILE_WIDTH/TILE_HEIGHT footprint. Only resourceNode/forestNode use this
+ * for now -- road art was reverted, see drawTiles(). */
 const TILE_SPRITE_SIZE = 136;
-
-type Direction = 'N' | 'S' | 'E' | 'W';
-
-/** Rotation (degrees) for each 2-connection combo the road art covers.
- * road_straight connects the opposite pair baked into its art at 0deg
- * (W+E); road_corner connects an adjacent pair at 0deg (S+E). Rotating in
- * 90deg steps cycles the connected pair through N->E->S->W. Best-effort --
- * nudge these if a piece renders rotated wrong once it's on screen. */
-const STRAIGHT_ROTATIONS: Record<string, number> = {
-  'E,W': 0,
-  'N,S': 90,
-};
-const CORNER_ROTATIONS: Record<string, number> = {
-  'E,S': 0,
-  'S,W': 90,
-  'N,W': 180,
-  'E,N': 270,
-};
-const ENDCAP_ROTATIONS: Record<string, number> = {
-  S: 0,
-  W: 90,
-  N: 180,
-  E: 270,
-};
-const TJUNCTION_ROTATIONS: Record<string, number> = {
-  'E,S,W': 0,
-  'N,S,W': 90,
-  'E,N,W': 180,
-  'E,N,S': 270,
-};
 
 function interpolateColor(from: number, to: number, ratio: number): number {
   const color = Phaser.Display.Color.Interpolate.ColorWithColor(
@@ -134,11 +105,8 @@ export class GridScene extends Phaser.Scene {
   preload(): void {
     this.load.image('terrain_rock_cluster', 'assets/tiles/terrain_rock_cluster.png');
     this.load.image('terrain_tree_cluster', 'assets/tiles/terrain_tree_cluster.png');
-    this.load.image('road_straight', 'assets/tiles/road_straight.png');
-    this.load.image('road_corner', 'assets/tiles/road_corner.png');
-    this.load.image('road_endcap', 'assets/tiles/road_endcap.png');
-    this.load.image('road_tjunction', 'assets/tiles/road_tjunction.png');
-    this.load.image('road_4way', 'assets/tiles/road_4way.png');
+    // Road art (road_straight/corner/endcap/tjunction/4way) is loaded once
+    // the manual-selection redesign lands -- see conversation.
   }
 
   create(): void {
@@ -268,14 +236,18 @@ export class GridScene extends Phaser.Scene {
           continue;
         }
         if (tile.type === 'road') {
-          const roadSprite = this.getRoadSprite(tile.x, tile.y, grid);
-          const sprite = this.setTileSprite(tile.x, tile.y, roadSprite.texture, roadSprite.angle);
-          // Congestion feedback was the one thing players could already read
-          // off the old flat tiles -- keep it by tinting the road art toward
-          // red as load approaches capacity, instead of losing the signal.
+          // Reverted to the flat diamond: the auto-picked road art (rotation
+          // guessed from source PNGs, scale assumed uniform across pieces)
+          // rendered wrong on screen -- oversized junction art overlapping
+          // neighbor tiles, wrong angles. Needs a real redesign (manual
+          // piece selection instead of auto-detected connections) before
+          // going back to sprites. See conversation for the plan.
           const ratio = (tile.load ?? 0) / (tile.roadCapacity ?? 1);
-          sprite.setTint(interpolateColor(0xffffff, ROAD_COLOR_CONGESTED, ratio));
-          seenSpriteCoords.add(`${tile.x},${tile.y}`);
+          this.tilesGraphics.fillStyle(
+            interpolateColor(0x777777, ROAD_COLOR_CONGESTED, ratio),
+            1,
+          );
+          this.drawTileDiamond(this.tilesGraphics, tile.x, tile.y);
           continue;
         }
 
@@ -332,44 +304,6 @@ export class GridScene extends Phaser.Scene {
     sprite.setAngle(angle);
     sprite.clearTint();
     return sprite;
-  }
-
-  /** Picks the road piece + rotation matching this tile's live neighbor
-   * connections. The full kit (endcap/straight/corner/T/4-way) covers every
-   * connection count 0-4, so this always returns art -- no flat-color
-   * fallback needed anymore. Rotation angles are a best-effort reverse
-   * engineering of the source art's orientation; if a piece looks rotated
-   * wrong once it's on screen, it's a one-line fix to the *_ROTATIONS
-   * tables above. */
-  private getRoadSprite(
-    gx: number,
-    gy: number,
-    grid: WorldState['grid'],
-  ): { texture: string; angle: number } {
-    const isRoad = (x: number, y: number): boolean => grid[y]?.[x]?.type === 'road';
-    const connections: Direction[] = [];
-    if (isRoad(gx, gy - 1)) connections.push('N');
-    if (isRoad(gx, gy + 1)) connections.push('S');
-    if (isRoad(gx + 1, gy)) connections.push('E');
-    if (isRoad(gx - 1, gy)) connections.push('W');
-
-    if (connections.length === 0) {
-      return { texture: 'road_straight', angle: STRAIGHT_ROTATIONS['E,W']! };
-    }
-    if (connections.length === 1) {
-      return { texture: 'road_endcap', angle: ENDCAP_ROTATIONS[connections[0]!]! };
-    }
-    const key = [...connections].sort().join(',');
-    if (connections.length === 2) {
-      if (key in STRAIGHT_ROTATIONS) {
-        return { texture: 'road_straight', angle: STRAIGHT_ROTATIONS[key]! };
-      }
-      return { texture: 'road_corner', angle: CORNER_ROTATIONS[key]! };
-    }
-    if (connections.length === 3) {
-      return { texture: 'road_tjunction', angle: TJUNCTION_ROTATIONS[key]! };
-    }
-    return { texture: 'road_4way', angle: 0 };
   }
 
   private isServiceCovered(
