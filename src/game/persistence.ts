@@ -28,6 +28,7 @@ interface SavedWorld {
   resourceNodes: WorldState['resourceNodes'];
   factories: WorldState['factories'];
   houses: WorldState['houses'];
+  services: WorldState['services'];
   shipments: WorldState['shipments'];
 }
 
@@ -52,6 +53,7 @@ function serialize(state: WorldState): SavedWorld {
     resourceNodes: state.resourceNodes,
     factories: state.factories,
     houses: state.houses,
+    services: state.services,
     shipments: state.shipments,
   };
 }
@@ -76,6 +78,7 @@ function deserialize(saved: SavedWorld): WorldState {
     resourceNodes: saved.resourceNodes,
     factories: saved.factories,
     houses: saved.houses,
+    services: saved.services ?? [],
     shipments: saved.shipments,
   };
 }

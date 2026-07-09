@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
-import { GRID_COLS, GRID_ROWS } from '../sim/constants';
-import { RECIPES } from '../sim/recipes';
+import { GRID_COLS, GRID_ROWS, SERVICE_COVERAGE_RADIUS } from '../sim/constants';
 import type { RecipeId, ResourceType, TileType, WorldState } from '../sim/types';
+import { BuildHud } from './BuildHud';
 import { gridToScreen, screenToGrid, TILE_HEIGHT, TILE_WIDTH } from './iso';
 import { saveWorldState } from './persistence';
 import { SimLoop } from './SimLoop';
@@ -20,7 +20,11 @@ const TILE_COLORS: Record<Exclude<TileType, 'empty' | 'house' | 'road'>, number>
   resourceNode: 0x8d6e63,
   forestNode: 0x2e7d32,
   factory: 0xff9800,
+  service: 0x5c6bc0,
 };
+
+const SERVICE_COVERAGE_MARKER_COLOR = 0x29b6f6;
+const SERVICE_COVERAGE_RADIUS_SQ = SERVICE_COVERAGE_RADIUS * SERVICE_COVERAGE_RADIUS;
 
 const SHIPMENT_COLORS: Record<ResourceType, number> = {
   ore: 0xffca28,
@@ -62,10 +66,14 @@ export class GridScene extends Phaser.Scene {
   private simLoop!: SimLoop;
   private userId!: string;
   private autosaveIntervalId: ReturnType<typeof setInterval> | null = null;
+  private gridLinesGraphics!: Phaser.GameObjects.Graphics;
   private tilesGraphics!: Phaser.GameObjects.Graphics;
   private shipmentsGraphics!: Phaser.GameObjects.Graphics;
   private labels = new Map<string, Phaser.GameObjects.Text>();
   private hudText!: Phaser.GameObjects.Text;
+  /** Non-zooming camera dedicated to fixed-position UI (the stats HUD). */
+  private uiCamera!: Phaser.Cameras.Scene2D.Camera;
+  private buildHud!: BuildHud;
   private currentTool: Tool = 'road';
   private selectedRecipeId: RecipeId = 'makeWidget';
   private selectedDemand: ResourceType = 'widget';
@@ -93,12 +101,39 @@ export class GridScene extends Phaser.Scene {
     this.setupZoom();
     this.setupToolSelection();
     this.setupHud();
+    this.setupUiCamera();
+    this.setupBuildHud();
     this.setupAutosave();
     this.simLoop.start();
     this.events.on('destroy', () => {
       this.simLoop.stop();
       if (this.autosaveIntervalId !== null) clearInterval(this.autosaveIntervalId);
     });
+  }
+
+  /**
+   * setScrollFactor(0) only cancels an object's response to camera SCROLL --
+   * the main camera's ZOOM transform still displaces its on-screen position
+   * (that's why the stats HUD drifted/vanished when zooming). Fix: render
+   * fixed UI through a second camera that never zooms or scrolls, and have
+   * each camera ignore the other's objects so nothing draws twice.
+   */
+  private setupUiCamera(): void {
+    this.uiCamera = this.cameras.add(0, 0, this.scale.width, this.scale.height);
+    this.uiCamera.ignore([this.gridLinesGraphics, this.tilesGraphics, this.shipmentsGraphics]);
+    this.cameras.main.ignore(this.hudText);
+    this.scale.on('resize', (gameSize: Phaser.Structs.Size) => {
+      this.uiCamera.setSize(gameSize.width, gameSize.height);
+    });
+  }
+
+  private setupBuildHud(): void {
+    this.buildHud = new BuildHud({
+      onToolChange: (tool) => (this.currentTool = tool),
+      onRecipeChange: (recipeId) => (this.selectedRecipeId = recipeId),
+      onDemandChange: (demand) => (this.selectedDemand = demand),
+    });
+    this.buildHud.setActiveTool(this.currentTool);
   }
 
   private setupAutosave(): void {
@@ -128,46 +163,25 @@ export class GridScene extends Phaser.Scene {
 
   private drawHud(): void {
     const { money, congestion, unlockedRecipes } = this.simLoop.getState();
-    const toolLabel: Record<Tool, string> = {
-      road: 'Road',
-      resourceNode: 'Resource Node',
-      forestNode: 'Forest Node',
-      factory: 'Factory',
-      house: 'House',
-    };
-
-    let toolDetail = '';
-    if (this.currentTool === 'factory')
-      toolDetail = ` (${this.selectedRecipeId}, press 3 to cycle)`;
-    if (this.currentTool === 'house')
-      toolDetail = ` (wants ${this.selectedDemand}, press 4 to cycle)`;
-
     this.hudText.setText(
-      [
-        `$${money.toFixed(0)}`,
-        `congestion: ${congestion.toFixed(2)}`,
-        `tool [1-5]: ${toolLabel[this.currentTool]}${toolDetail}`,
-        `recipes: ${unlockedRecipes.join(', ')}`,
-      ].join('   '),
+      [`$${money.toFixed(0)}`, `congestion: ${congestion.toFixed(2)}`].join('   '),
     );
-    // scrollFactor(0) cancels scroll but not zoom -- counter-scale so the
-    // HUD reads at a constant screen size regardless of camera zoom.
-    this.hudText.setScale(1 / this.cameras.main.zoom);
+    this.buildHud.syncUnlockedRecipes(unlockedRecipes, this.selectedRecipeId, this.selectedDemand);
   }
 
   private drawGridLines(): void {
-    const graphics = this.add.graphics();
-    graphics.lineStyle(1, 0x333333, 1);
+    this.gridLinesGraphics = this.add.graphics();
+    this.gridLinesGraphics.lineStyle(1, 0x333333, 1);
 
     for (let col = 0; col <= GRID_COLS; col++) {
       const a = gridToScreen(col, 0);
       const b = gridToScreen(col, GRID_ROWS);
-      graphics.lineBetween(a.x, a.y, b.x, b.y);
+      this.gridLinesGraphics.lineBetween(a.x, a.y, b.x, b.y);
     }
     for (let row = 0; row <= GRID_ROWS; row++) {
       const a = gridToScreen(0, row);
       const b = gridToScreen(GRID_COLS, row);
-      graphics.lineBetween(a.x, a.y, b.x, b.y);
+      this.gridLinesGraphics.lineBetween(a.x, a.y, b.x, b.y);
     }
   }
 
@@ -186,7 +200,7 @@ export class GridScene extends Phaser.Scene {
 
   private drawTiles(): void {
     this.tilesGraphics.clear();
-    const { grid, houses } = this.simLoop.getState();
+    const { grid, houses, services } = this.simLoop.getState();
     const houseByCoord = new Map(houses.map((h) => [`${h.x},${h.y}`, h]));
 
     for (const row of grid) {
@@ -210,8 +224,24 @@ export class GridScene extends Phaser.Scene {
           this.tilesGraphics.fillStyle(TILE_COLORS[tile.type], 1);
         }
         this.drawTileDiamond(this.tilesGraphics, tile.x, tile.y);
+
+        // Coverage-radius mechanic is otherwise invisible -- mark covered
+        // houses with a small dot so the player can see the effect land.
+        if (tile.type === 'house' && this.isServiceCovered(tile.x, tile.y, services)) {
+          const center = gridToScreen(tile.x + 0.5, tile.y + 0.5);
+          this.tilesGraphics.fillStyle(SERVICE_COVERAGE_MARKER_COLOR, 0.9);
+          this.tilesGraphics.fillCircle(center.x, center.y, TILE_HEIGHT / 6);
+        }
       }
     }
+  }
+
+  private isServiceCovered(
+    x: number,
+    y: number,
+    services: WorldState['services'],
+  ): boolean {
+    return services.some((s) => (s.x - x) ** 2 + (s.y - y) ** 2 <= SERVICE_COVERAGE_RADIUS_SQ);
   }
 
   private drawShipments(): void {
@@ -273,6 +303,7 @@ export class GridScene extends Phaser.Scene {
       });
       label.setOrigin(0.5, 1);
       this.labels.set(id, label);
+      this.uiCamera.ignore(label);
     }
     label.setText(text);
     const screen = gridToScreen(tileX + 0.5, tileY + 0.5);
@@ -372,35 +403,19 @@ export class GridScene extends Phaser.Scene {
     );
   }
 
+  /** Keyboard shortcuts 1-5 remain as a fast path; the build HUD buttons do the same thing. */
   private setupToolSelection(): void {
     this.input.mouse?.disableContextMenu();
-    this.input.keyboard?.on('keydown-ONE', () => (this.currentTool = 'road'));
-    this.input.keyboard?.on('keydown-TWO', () => (this.currentTool = 'resourceNode'));
-    this.input.keyboard?.on('keydown-THREE', () => {
-      if (this.currentTool === 'factory') {
-        this.selectedRecipeId = this.nextValue(
-          this.simLoop.getState().unlockedRecipes,
-          this.selectedRecipeId,
-        );
-      }
-      this.currentTool = 'factory';
-    });
-    this.input.keyboard?.on('keydown-FOUR', () => {
-      if (this.currentTool === 'house') {
-        const demands = [
-          ...new Set(this.simLoop.getState().unlockedRecipes.map((id) => RECIPES[id].output)),
-        ];
-        this.selectedDemand = this.nextValue(demands, this.selectedDemand);
-      }
-      this.currentTool = 'house';
-    });
-    this.input.keyboard?.on('keydown-FIVE', () => (this.currentTool = 'forestNode'));
+    this.input.keyboard?.on('keydown-ONE', () => this.setTool('road'));
+    this.input.keyboard?.on('keydown-TWO', () => this.setTool('resourceNode'));
+    this.input.keyboard?.on('keydown-THREE', () => this.setTool('factory'));
+    this.input.keyboard?.on('keydown-FOUR', () => this.setTool('house'));
+    this.input.keyboard?.on('keydown-FIVE', () => this.setTool('forestNode'));
+    this.input.keyboard?.on('keydown-SIX', () => this.setTool('service'));
   }
 
-  /** Cycles to the value after `current` in `values`, wrapping around. */
-  private nextValue<T>(values: T[], current: T): T {
-    if (values.length === 0) return current;
-    const index = values.indexOf(current);
-    return values[(index + 1) % values.length] ?? values[0]!;
+  private setTool(tool: Tool): void {
+    this.currentTool = tool;
+    this.buildHud.setActiveTool(tool);
   }
 }

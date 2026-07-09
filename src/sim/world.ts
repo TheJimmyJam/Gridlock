@@ -16,6 +16,8 @@ import {
   MAX_TRIP_TICKS,
   NODE_BUFFER_CAP,
   ROAD_CAPACITY,
+  SERVICE_COVERAGE_RADIUS,
+  SERVICE_HAPPINESS_BONUS,
   STARTING_MONEY,
   TAX_RATE_PER_POP_PER_TICK,
   TILE_COSTS,
@@ -29,6 +31,7 @@ import type {
   RecipeId,
   ResourceNode,
   ResourceType,
+  Service,
   Shipment,
   Tile,
   WorldState,
@@ -49,6 +52,7 @@ export function createWorldState(): WorldState {
     resourceNodes: [],
     factories: [],
     houses: [],
+    services: [],
     shipments: [],
     nextEntityId: 1,
     money: STARTING_MONEY,
@@ -63,6 +67,12 @@ function inBounds(x: number, y: number): boolean {
 
 function countInFlightFrom(shipments: Shipment[], sourceId: string): number {
   return shipments.filter((s) => s.fromId === sourceId).length;
+}
+
+/** Whether a point is within any service building's coverage radius. */
+function isServiceCovered(x: number, y: number, services: Service[]): boolean {
+  const radiusSq = SERVICE_COVERAGE_RADIUS * SERVICE_COVERAGE_RADIUS;
+  return services.some((s) => (s.x - x) ** 2 + (s.y - y) ** 2 <= radiusSq);
 }
 
 /** Any producer (resource node or factory) with something to ship. */
@@ -117,6 +127,7 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
   let resourceNodes = state.resourceNodes.slice();
   let factories = state.factories.slice();
   let houses = state.houses.slice();
+  let services = state.services.slice();
   const unlockedRecipes = new Set<RecipeId>(state.unlockedRecipes);
   const validDemands = new Set<ResourceType>([...unlockedRecipes].map((id) => RECIPES[id].output));
 
@@ -196,12 +207,16 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
             population: HOUSE_POPULATION,
           },
         ];
+      } else if (action.tileType === 'service') {
+        const service: Service = { id: `service-${nextEntityId++}`, x: action.x, y: action.y };
+        services = [...services, service];
       }
     } else if (action.type === 'REMOVE_TILE') {
       row[action.x] = { x: action.x, y: action.y, type: 'empty' };
       resourceNodes = resourceNodes.filter((n) => n.x !== action.x || n.y !== action.y);
       factories = factories.filter((f) => f.x !== action.x || f.y !== action.y);
       houses = houses.filter((h) => h.x !== action.x || h.y !== action.y);
+      services = services.filter((s) => s.x !== action.x || s.y !== action.y);
     }
   }
 
@@ -450,6 +465,13 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
       happiness = Math.max(HAPPINESS_MIN, happiness - HAPPINESS_STEP);
     }
 
+    // Service buildings give covered houses a flat happiness boost every
+    // tick, independent of demand/commute events -- a lever the player can
+    // pull to protect happiness while fixing a congested network.
+    if (isServiceCovered(h.x, h.y, services)) {
+      happiness = Math.min(HAPPINESS_MAX, happiness + SERVICE_HAPPINESS_BONUS);
+    }
+
     taxIncome += h.population * (happiness / HAPPINESS_MAX) * TAX_RATE_PER_POP_PER_TICK;
 
     return { ...h, demandBuffer, happiness, ticksSinceDemandFulfilled, ticksSinceCommute };
@@ -462,6 +484,7 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
     resourceNodes,
     factories,
     houses,
+    services,
     shipments,
     nextEntityId,
     money,

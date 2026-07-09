@@ -1,4 +1,11 @@
-export type TileType = 'empty' | 'road' | 'resourceNode' | 'forestNode' | 'factory' | 'house';
+export type TileType =
+  | 'empty'
+  | 'road'
+  | 'resourceNode'
+  | 'forestNode'
+  | 'factory'
+  | 'house'
+  | 'service';
 
 export interface Tile {
   x: number;
@@ -51,6 +58,13 @@ export interface House {
   population: number;
 }
 
+/** A civic building that boosts happiness for houses within its coverage radius. */
+export interface Service {
+  id: string;
+  x: number;
+  y: number;
+}
+
 export type ShipmentKind = 'freight' | 'commuter';
 
 export interface Shipment {
@@ -73,6 +87,7 @@ export interface WorldState {
   resourceNodes: ResourceNode[];
   factories: Factory[];
   houses: House[];
+  services: Service[];
   shipments: Shipment[];
   nextEntityId: number;
   money: number;

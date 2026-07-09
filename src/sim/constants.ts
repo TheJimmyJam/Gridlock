@@ -49,7 +49,19 @@ export const TILE_COSTS: Record<Exclude<TileType, 'empty'>, number> = {
   forestNode: 20,
   factory: 100,
   house: 50,
+  service: 150,
 };
 
 // --- Phase 6: recipes/tech progression ---
 export const INITIAL_UNLOCKED_RECIPES: RecipeId[] = ['makeWidget', 'makePlank'];
+
+// --- Phase 6: service buildings ---
+/** Tiles (Euclidean, grid units) within which a service building boosts house happiness. */
+export const SERVICE_COVERAGE_RADIUS = 8;
+/**
+ * Flat happiness gain per tick for a covered house, independent of
+ * demand/commute events. A totally disconnected house still decays (both
+ * idle penalties = -4/tick, this only offsets 3 of it) -- services soften
+ * the cascade, they don't replace needing roads.
+ */
+export const SERVICE_HAPPINESS_BONUS = 3;

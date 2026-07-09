@@ -11,12 +11,14 @@ const signUpBtn = document.getElementById('auth-sign-up') as HTMLButtonElement;
 const errorEl = document.getElementById('auth-error') as HTMLDivElement;
 const statusEl = document.getElementById('auth-status') as HTMLDivElement;
 const signOutBtn = document.getElementById('sign-out-btn') as HTMLButtonElement;
+const buildHudEl = document.getElementById('build-hud') as HTMLDivElement;
 
 let game: Phaser.Game | null = null;
 
 async function startGame(userId: string): Promise<void> {
   authOverlay.classList.add('hidden');
   signOutBtn.style.display = 'block';
+  buildHudEl.style.display = 'flex';
 
   statusEl.textContent = '';
   const initialState = (await loadWorldState(userId)) ?? undefined;
@@ -39,6 +41,7 @@ async function startGame(userId: string): Promise<void> {
 function showAuthOverlay(): void {
   authOverlay.classList.remove('hidden');
   signOutBtn.style.display = 'none';
+  buildHudEl.style.display = 'none';
   if (game) {
     game.destroy(true);
     game = null;
