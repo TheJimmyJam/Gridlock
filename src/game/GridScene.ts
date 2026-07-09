@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { GRID_COLS, GRID_ROWS, SERVICE_COVERAGE_RADIUS } from '../sim/constants';
-import type { RecipeId, ResourceType, TileType, WorldState } from '../sim/types';
+import type { RecipeId, ResourceType, RoadPiece, TileType, WorldState } from '../sim/types';
 import { BuildHud } from './BuildHud';
 import { gridToScreen, screenToGrid, TILE_HEIGHT, TILE_WIDTH } from './iso';
 import { saveWorldState } from './persistence';
@@ -39,11 +39,30 @@ const HOUSE_COLOR_UNHAPPY = 0xe53935;
 const HOUSE_COLOR_HAPPY = 0x66bb6a;
 const ROAD_COLOR_CONGESTED = 0xe53935;
 
-/** Source art canvases are square with padding around the diamond; this is
- * the display size (px) that makes the diamond within them match the grid's
- * TILE_WIDTH/TILE_HEIGHT footprint. Only resourceNode/forestNode use this
- * for now -- road art was reverted, see drawTiles(). */
-const TILE_SPRITE_SIZE = 136;
+/** Source art canvases are square (320x320) with padding around the
+ * diamond, and the artist wasn't perfectly consistent about how much of the
+ * canvas the diamond fills piece to piece -- using one uniform display size
+ * for all of them is what made the road junction art look oversized/
+ * misaligned earlier. Each texture gets its own measured display size
+ * (non-uniform w/h) so its diamond content lands on exactly TILE_WIDTH x
+ * TILE_HEIGHT regardless of the source art's own proportions. */
+const TEXTURE_DISPLAY_SIZE: Record<string, { w: number; h: number }> = {
+  terrain_rock_cluster: { w: 146, h: 110 },
+  terrain_tree_cluster: { w: 136, h: 88 },
+  road_straight: { w: 135, h: 119 },
+  road_corner: { w: 135, h: 141 },
+  road_endcap: { w: 155, h: 118 },
+  road_tjunction: { w: 139, h: 111 },
+  road_4way: { w: 136, h: 108 },
+};
+
+const ROAD_PIECE_TEXTURES: Record<RoadPiece, string> = {
+  straight: 'road_straight',
+  corner: 'road_corner',
+  tjunction: 'road_tjunction',
+  '4way': 'road_4way',
+  endcap: 'road_endcap',
+};
 
 function interpolateColor(from: number, to: number, ratio: number): number {
   const color = Phaser.Display.Color.Interpolate.ColorWithColor(
@@ -87,6 +106,8 @@ export class GridScene extends Phaser.Scene {
   private currentTool: Tool = 'road';
   private selectedRecipeId: RecipeId = 'makeWidget';
   private selectedDemand: ResourceType = 'widget';
+  private selectedRoadPiece: RoadPiece = 'straight';
+  private selectedRoadAngle: 0 | 90 | 180 | 270 = 0;
 
   private isDragging = false;
   private pointerDownPos = new Phaser.Math.Vector2();
@@ -105,8 +126,11 @@ export class GridScene extends Phaser.Scene {
   preload(): void {
     this.load.image('terrain_rock_cluster', 'assets/tiles/terrain_rock_cluster.png');
     this.load.image('terrain_tree_cluster', 'assets/tiles/terrain_tree_cluster.png');
-    // Road art (road_straight/corner/endcap/tjunction/4way) is loaded once
-    // the manual-selection redesign lands -- see conversation.
+    this.load.image('road_straight', 'assets/tiles/road_straight.png');
+    this.load.image('road_corner', 'assets/tiles/road_corner.png');
+    this.load.image('road_endcap', 'assets/tiles/road_endcap.png');
+    this.load.image('road_tjunction', 'assets/tiles/road_tjunction.png');
+    this.load.image('road_4way', 'assets/tiles/road_4way.png');
   }
 
   create(): void {
@@ -149,6 +173,8 @@ export class GridScene extends Phaser.Scene {
       onToolChange: (tool) => (this.currentTool = tool),
       onRecipeChange: (recipeId) => (this.selectedRecipeId = recipeId),
       onDemandChange: (demand) => (this.selectedDemand = demand),
+      onRoadPieceChange: (piece) => (this.selectedRoadPiece = piece),
+      onRoadAngleChange: (angle) => (this.selectedRoadAngle = angle),
     });
     this.buildHud.setActiveTool(this.currentTool);
   }
@@ -236,18 +262,17 @@ export class GridScene extends Phaser.Scene {
           continue;
         }
         if (tile.type === 'road') {
-          // Reverted to the flat diamond: the auto-picked road art (rotation
-          // guessed from source PNGs, scale assumed uniform across pieces)
-          // rendered wrong on screen -- oversized junction art overlapping
-          // neighbor tiles, wrong angles. Needs a real redesign (manual
-          // piece selection instead of auto-detected connections) before
-          // going back to sprites. See conversation for the plan.
+          // Piece + rotation are chosen by the player at placement time
+          // (BuildHud's road piece selector + rotate button) and stored on
+          // the tile -- not auto-detected from neighbors. Auto-detection
+          // guessed rotation/scale wrong often enough to look broken; manual
+          // placement means whatever the player sees before placing is
+          // exactly what renders.
+          const texture = ROAD_PIECE_TEXTURES[tile.roadPiece ?? 'straight'];
+          const sprite = this.setTileSprite(tile.x, tile.y, texture, tile.roadAngle ?? 0);
           const ratio = (tile.load ?? 0) / (tile.roadCapacity ?? 1);
-          this.tilesGraphics.fillStyle(
-            interpolateColor(0x777777, ROAD_COLOR_CONGESTED, ratio),
-            1,
-          );
-          this.drawTileDiamond(this.tilesGraphics, tile.x, tile.y);
+          sprite.setTint(interpolateColor(0xffffff, ROAD_COLOR_CONGESTED, ratio));
+          seenSpriteCoords.add(`${tile.x},${tile.y}`);
           continue;
         }
 
@@ -293,11 +318,14 @@ export class GridScene extends Phaser.Scene {
     let sprite = this.tileSprites.get(key);
     if (!sprite) {
       sprite = this.add.image(0, 0, texture);
-      sprite.setDisplaySize(TILE_SPRITE_SIZE, TILE_SPRITE_SIZE);
       this.uiCamera.ignore(sprite);
       this.tileSprites.set(key, sprite);
+      const size = TEXTURE_DISPLAY_SIZE[texture];
+      if (size) sprite.setDisplaySize(size.w, size.h);
     } else if (sprite.texture.key !== texture) {
       sprite.setTexture(texture);
+      const size = TEXTURE_DISPLAY_SIZE[texture];
+      if (size) sprite.setDisplaySize(size.w, size.h);
     }
     const center = gridToScreen(gx + 0.5, gy + 0.5);
     sprite.setPosition(center.x, center.y);
@@ -450,6 +478,15 @@ export class GridScene extends Phaser.Scene {
         y: tileY,
         tileType: 'house',
         demand: this.selectedDemand,
+      });
+    } else if (this.currentTool === 'road') {
+      this.simLoop.enqueue({
+        type: 'PLACE_TILE',
+        x: tileX,
+        y: tileY,
+        tileType: 'road',
+        roadPiece: this.selectedRoadPiece,
+        roadAngle: this.selectedRoadAngle,
       });
     } else {
       this.simLoop.enqueue({ type: 'PLACE_TILE', x: tileX, y: tileY, tileType: this.currentTool });

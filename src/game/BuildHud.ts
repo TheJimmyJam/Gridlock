@@ -1,5 +1,5 @@
 import { RECIPES } from '../sim/recipes';
-import type { RecipeId, ResourceType, TileType } from '../sim/types';
+import type { RecipeId, ResourceType, RoadPiece, TileType } from '../sim/types';
 
 export type Tool = Exclude<TileType, 'empty'>;
 
@@ -7,9 +7,20 @@ export interface BuildHudCallbacks {
   onToolChange: (tool: Tool) => void;
   onRecipeChange: (recipeId: RecipeId) => void;
   onDemandChange: (demand: ResourceType) => void;
+  onRoadPieceChange: (piece: RoadPiece) => void;
+  onRoadAngleChange: (angle: 0 | 90 | 180 | 270) => void;
 }
 
 const TOOLS: Tool[] = ['road', 'resourceNode', 'forestNode', 'factory', 'house', 'service'];
+
+const ROAD_PIECE_LABELS: Record<RoadPiece, string> = {
+  straight: 'Straight',
+  corner: 'Corner',
+  tjunction: 'T-Junction',
+  '4way': '4-Way',
+  endcap: 'End Cap',
+};
+const ROAD_PIECES: RoadPiece[] = ['straight', 'corner', 'tjunction', '4way', 'endcap'];
 
 /**
  * DOM-based building toolbar (matches the auth-overlay/sign-out-button
@@ -21,11 +32,23 @@ export class BuildHud {
   private buttons = new Map<Tool, HTMLButtonElement>();
   private recipeSelect: HTMLSelectElement;
   private demandSelect: HTMLSelectElement;
+  private roadPieceSelect: HTMLSelectElement;
+  private rotateBtn: HTMLButtonElement;
   private lastUnlockedKey = '';
+  private roadAngle: 0 | 90 | 180 | 270 = 0;
 
   constructor(private callbacks: BuildHudCallbacks) {
     this.recipeSelect = document.getElementById('recipe-select') as HTMLSelectElement;
     this.demandSelect = document.getElementById('demand-select') as HTMLSelectElement;
+    this.roadPieceSelect = document.getElementById('road-piece-select') as HTMLSelectElement;
+    this.rotateBtn = document.getElementById('road-rotate-btn') as HTMLButtonElement;
+
+    for (const piece of ROAD_PIECES) {
+      const opt = document.createElement('option');
+      opt.value = piece;
+      opt.textContent = ROAD_PIECE_LABELS[piece];
+      this.roadPieceSelect.appendChild(opt);
+    }
 
     for (const tool of TOOLS) {
       const btn = document.querySelector<HTMLButtonElement>(`.build-btn[data-tool="${tool}"]`);
@@ -43,6 +66,19 @@ export class BuildHud {
     this.demandSelect.addEventListener('change', () => {
       this.callbacks.onDemandChange(this.demandSelect.value as ResourceType);
     });
+    this.roadPieceSelect.addEventListener('change', () => {
+      this.callbacks.onRoadPieceChange(this.roadPieceSelect.value as RoadPiece);
+    });
+    this.rotateBtn.addEventListener('click', () => {
+      this.roadAngle = (((this.roadAngle + 90) % 360) as 0 | 90 | 180 | 270);
+      this.updateRotateLabel();
+      this.callbacks.onRoadAngleChange(this.roadAngle);
+    });
+    this.updateRotateLabel();
+  }
+
+  private updateRotateLabel(): void {
+    this.rotateBtn.textContent = `⟳ Rotate (${this.roadAngle}°)`;
   }
 
   /** Highlights the active tool button and shows/hides the relevant dropdown. */
@@ -50,6 +86,8 @@ export class BuildHud {
     for (const [t, btn] of this.buttons) btn.classList.toggle('active', t === tool);
     this.recipeSelect.style.display = tool === 'factory' ? 'inline-block' : 'none';
     this.demandSelect.style.display = tool === 'house' ? 'inline-block' : 'none';
+    this.roadPieceSelect.style.display = tool === 'road' ? 'inline-block' : 'none';
+    this.rotateBtn.style.display = tool === 'road' ? 'inline-block' : 'none';
   }
 
   /** Repopulates the recipe/demand dropdowns whenever the unlocked set changes. */

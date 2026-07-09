@@ -151,6 +151,8 @@ export function tick(state: WorldState, actions: Action[]): WorldState {
           type: 'road',
           roadCapacity: ROAD_CAPACITY,
           load: 0,
+          roadPiece: action.roadPiece ?? 'straight',
+          roadAngle: action.roadAngle ?? 0,
         };
       } else {
         row[action.x] = { x: action.x, y: action.y, type: action.tileType };

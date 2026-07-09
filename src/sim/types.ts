@@ -7,6 +7,11 @@ export type TileType =
   | 'house'
   | 'service';
 
+/** Which road art piece a road tile renders as. Player-chosen at placement
+ * time (see BuildHud's road piece selector) -- not auto-detected from
+ * neighbors, since that approach misrendered badly in practice. */
+export type RoadPiece = 'straight' | 'corner' | 'tjunction' | '4way' | 'endcap';
+
 export interface Tile {
   x: number;
   y: number;
@@ -15,6 +20,9 @@ export interface Tile {
   roadCapacity?: number;
   /** Only set for road tiles; recomputed fresh every tick from shipment positions. */
   load?: number;
+  /** Only set for road tiles. Defaults to 'straight'/0 for older saves. */
+  roadPiece?: RoadPiece;
+  roadAngle?: 0 | 90 | 180 | 270;
 }
 
 export type ResourceType = 'ore' | 'wood' | 'plank' | 'widget' | 'food';
@@ -106,5 +114,8 @@ export type Action =
       recipeId?: RecipeId;
       /** Only meaningful when tileType === 'house'. Defaults to 'widget'. */
       demand?: ResourceType;
+      /** Only meaningful when tileType === 'road'. Defaults to 'straight'/0. */
+      roadPiece?: RoadPiece;
+      roadAngle?: 0 | 90 | 180 | 270;
     }
   | { type: 'REMOVE_TILE'; x: number; y: number };
