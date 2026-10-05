@@ -15,6 +15,10 @@ const buildHudEl = document.getElementById('build-hud') as HTMLDivElement;
 
 let game: Phaser.Game | null = null;
 
+// Sign-in shortcut: typing "jimmy" means jimmy@cannoncodeconnect.com.
+const expandJimmy = (v: string): string =>
+  v.trim().toLowerCase() === 'jimmy' ? 'jimmy@cannoncodeconnect.com' : v;
+
 async function startGame(userId: string): Promise<void> {
   authOverlay.classList.add('hidden');
   signOutBtn.style.display = 'block';
@@ -52,6 +56,7 @@ signInBtn.addEventListener('click', () => {
   void (async () => {
     errorEl.textContent = '';
     statusEl.textContent = 'Signing in…';
+    emailInput.value = expandJimmy(emailInput.value);
     const { error } = await supabase.auth.signInWithPassword({
       email: emailInput.value,
       password: passwordInput.value,
